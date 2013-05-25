@@ -1,4 +1,38 @@
-defunc
+Defunc
 ======
 
-Defunc traces your method calls and logs them to an IO stream
+Defunc is a tracing module which is plugged into a
+class to trace entering, exiting and respective values
+to a specified stream.
+
+== Usage
+
+  class Random
+    extend Defunc
+
+    def self.random
+      5
+    end
+  end
+
+This scenario will trace a call Random.random() to
+standard out and show you the empty argument array []
+and the returned value 5.
+
+  class Random
+    extend Defunc
+
+    watch_methods :initialize, :random
+    set_out_stream File.open("path/to/file", "w")
+
+  end
+
+Defunc offers two methods for class definitions to
+control the watched methods (this includes class
+and instance methods alike) and the stream it logs
+to. set_out_stream accepts any IO instance that has
+:puts defined.
+
+The IO instance is class-based and so is watch_methods.
+You can extend your super-class (like a base model)
+and have all deriving models enable tracing by that.
