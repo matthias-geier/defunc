@@ -44,6 +44,7 @@ $object_id_count = []
 $outstream = $stdout
 $threshold = 120
 $trace_all = false
+$method_store = {}
 
 class BasicObject
 
@@ -131,14 +132,14 @@ class BasicObject
     def override_methods(klass, selff, m_name, m_def)
       $indentation = 0 unless $indentation
 
-      @method_store ||= {:singleton => [], :instance => []}
+      $method_store[selff.to_s] ||= {:singleton => [], :instance => []}
       watch = get_variable(:@@watched_methods)
       scope = klass == selff ? :instance : :singleton
-      return if @method_store[scope].include?(m_name) ||
+      return if $method_store[selff.to_s][scope].include?(m_name) ||
         (watch[scope].any? && !watch[scope].include?(m_name.to_sym)) ||
-        (watch[scope].empty? && !$trace_all)
+        (watch[scope].empty? && !$trace_all) || m_name =~ /bind/i
 
-      @method_store[scope] << m_name
+      $method_store[selff.to_s][scope] << m_name
 
       selff.send(:define_method, m_name) do |*args, &block|
         i = $indentation
@@ -147,7 +148,13 @@ class BasicObject
           "#{" "*i}enter #{klass.name}##{m_name}: #{args.inspect}")
         $indentation += 2
 
-        m_def = m_def.bind(self) if m_def.is_a?(UnboundMethod)
+        p self.send(:binding)
+        p selff.to_s
+        p $method_store[selff.to_s][scope]
+        if m_def.is_a?(UnboundMethod)
+          puts "Binding #{m_name}"
+          m_def = m_def.bind(self)
+        end
         result = m_def.call(*args, &block)
 
         $indentation -= 2
