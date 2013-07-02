@@ -39,102 +39,145 @@
 #
 #
 #
-module Defunc
+$object_ids = {}
+$object_id_count = []
+$outstream = $stdout
+$threshold = 120
+$trace_all = false
 
-  # Private Class method
-  #
-  # Updates or initially sets a class variable in the
-  # attached class.
-  # [sym:] Class variable symbol
-  # [value:] New value of the variable
-  def update_variable(sym, value)
-    self.class_variable_set(sym, value)
-  end
-  private :update_variable
+class BasicObject
 
-  # Private Class method
-  #
-  # Retrieves a class variable from the attached class. If
-  # the variable is not found, the default or [] is set.
-  # [sym:] Class variable symbol
-  # [default:] Default value if variable is not defined, default: []
-  # [returns:] Value of the variable
-  def get_variable(sym, default=[])
-    unless self.class_variable_defined?(sym)
-      self.class_variable_set(sym, default)
-    end
-    self.class_variable_get(sym)
-  end
-  private :get_variable
+  class << self
 
-  # Class method
-  #
-  # By calling this in the class body, method symbols are set for
-  # being watched and traced by the module.
-  # [*args:] any number of symbols
-  def watch_methods(*args)
-    watch = get_variable(:@@watched_methods)
-    update_variable(:@@watched_methods, watch.push(args).flatten.uniq)
-  end
+    alias saving_new new
 
-  # Class method
-  #
-  # By calling this in the class body, standard out is replaced by
-  # the stream given. Every trace is being logged to the new stream.
-  # [stream:] IO instance
-  def set_out_stream(stream)
-    update_variable(:@@out, stream)
-  end
-
-  # Instance method override
-  #
-  # Automatically called when a method is added to the instance body.
-  # [m:] Method symbol
-  def method_added(m)
-    override_methods(self, self, m, instance_method(m))
-  end
-
-  # Class method override
-  #
-  # Automatically called when a method is added to the class body.
-  # [m:] Method symbol
-  def singleton_method_added(m)
-    meta = class << self; self; end
-    override_methods(self, meta, m, method(m))
-  end
-
-  # Class method
-  #
-  # Is called from both method added overrides and wraps the method
-  # call with trace messages.
-  # [klass:] Class
-  # [selff:] Reference for method override
-  # [m_name:] Method symbol
-  # [m_def:] Method reference
-  def override_methods(klass, selff, m_name, m_def)
-    $indentation = 0 unless $indentation
-    outstream = get_variable(:@@out, $stdout)
-
-    @method_store = [] unless @method_store
-    watch = get_variable(:@@watched_methods)
-    return if @method_store.include?(m_name) ||
-      (watch.any? && !watch.include?(m_name.to_sym))
-
-    @method_store << m_name
-
-    selff.send(:define_method, m_name) do |*args, &block|
-      i = $indentation
-      outstream.puts "#{" "*i}enter #{m_name}: #{args.inspect}"
-      $indentation += 2
-
-      m_def = m_def.bind(self) if m_def.is_a?(UnboundMethod)
-      result = m_def.call(*args, &block)
-
-      $indentation -= 2
-      outstream.puts "#{" "*i}exit #{m_name}: #{result.inspect}"
-
+    def new(*args, &block)
+      result = saving_new(*args, &block)
+      unless $object_id_count.include?(result.object_id)
+        $object_id_count << result.object_id
+      end
+      if self.name.split('::').include?("RubyToken") or
+          $object_ids[result.object_id]
+        return result
+      end
+      $object_ids[result.object_id] = Time.now
+      ObjectSpace.define_finalizer(result, self.method(:finalize).to_proc)
       result
     end
+
+    def finalize(id)
+      $object_id_count.delete(id)
+      t = $object_ids[id]
+      if t and Time.now - t > $threshold
+        $outstream.puts "Collecting #{self} with id #{id} which stayed " +
+          "in memory for #{Time.now - t}s"
+      end
+      $object_ids.delete(id)
+    end
+
+    # Private Class method
+    #
+    # Updates or initially sets a class variable in the
+    # attached class.
+    # [sym:] Class variable symbol
+    # [value:] New value of the variable
+    def update_variable(sym, value)
+      self.class_variable_set(sym, value)
+    end
+    protected :update_variable
+
+    # Private Class method
+    #
+    # Retrieves a class variable from the attached class. If
+    # the variable is not found, the default or [] is set.
+    # [sym:] Class variable symbol
+    # [default:] Default value if variable is not defined, default: {}
+    # [returns:] Value of the variable
+    def get_variable(sym, default={:singleton => [], :instance => []})
+      unless self.class_variable_defined?(sym)
+        self.class_variable_set(sym, default)
+      end
+      self.class_variable_get(sym)
+    end
+    protected :get_variable
+
+    # Class method
+    #
+    # By calling this in the class body, method symbols are set for
+    # being watched and traced by the module.
+    # [*args:] any number of symbols
+    def watch_methods(*args)
+      watch = get_variable(:@@watched_methods)
+      args.each do |m|
+        if "#{self.name}".empty?
+          # singleton scope
+          watch[:singleton] << m
+        else
+          # instance scope
+          watch[:instance] << m
+        end
+      end
+      update_variable(:@@watched_methods, watch)
+    end
+
+    # Class method
+    #
+    # Is called from both method added overrides and wraps the method
+    # call with trace messages.
+    # [klass:] Class
+    # [selff:] Reference for method override
+    # [m_name:] Method symbol
+    # [m_def:] Method reference
+    def override_methods(klass, selff, m_name, m_def)
+      $indentation = 0 unless $indentation
+
+      @method_store ||= {:singleton => [], :instance => []}
+      watch = get_variable(:@@watched_methods)
+      scope = klass == selff ? :instance : :singleton
+      return if @method_store[scope].include?(m_name) ||
+        (watch[scope].any? && !watch[scope].include?(m_name.to_sym)) ||
+        (watch[scope].empty? && !$trace_all)
+
+      @method_store[scope] << m_name
+
+      selff.send(:define_method, m_name) do |*args, &block|
+        i = $indentation
+        item_count = $object_id_count.count
+        $outstream.puts(
+          "#{" "*i}enter #{klass.name}##{m_name}: #{args.inspect}")
+        $indentation += 2
+
+        m_def = m_def.bind(self) if m_def.is_a?(UnboundMethod)
+        result = m_def.call(*args, &block)
+
+        $indentation -= 2
+        item_diff = $object_id_count.count - item_count
+        $outstream.puts("#{" "*i}exit #{klass}##{m_name}: #{result.inspect}\
+ (object count has changed by %+d)" % [item_diff])
+
+        result
+      end
+    end
+
+    # Instance method override
+    #
+    # Automatically called when a method is added to the instance body.
+    # [m:] Method symbol
+    def method_added(m)
+      self.override_methods(self, self, m, instance_method(m))
+    end
+
+    # Class method override
+    #
+    # Automatically called when a method is added to the class body.
+    # [m:] Method symbol
+    def singleton_method_added(m)
+      return if m == :singleton_method_added
+      meta = class << self; self; end
+      override_methods(self, meta, m, method(m))
+    end
+
   end
 
 end
+
